@@ -2,6 +2,7 @@ package main.frame.userservice.service;
 
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceContext;
+import jakarta.persistence.TypedQuery;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import main.frame.userservice.dto.request.RegisterRequest;
@@ -14,6 +15,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.security.Principal;
+import java.time.LocalDateTime;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -101,10 +103,118 @@ public class UserServiceImp implements UserService {
 
 
     @Override
-    public Optional<User> getUserByPrincipal(Principal principal) {
+    public Optional<UserDTO> getUserByPrincipal(Principal principal) {
         if (principal == null) return Optional.empty();
         return findByEmail(principal.getName());
     }
+
+    @Transactional
+    @Override
+    public void changePassword(Long userId, String oldPassword, String newPassword) {
+        // Поиск пользователя по ID
+        User user = entityManager.find(User.class, userId);
+        if (user == null) {
+            throw new UsernameNotFoundException("Пользователь с ID: " + userId + " не найден!");
+        }
+
+        // Проверяем текущий пароль
+        BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
+        if (!passwordEncoder.matches(oldPassword, user.getPassword())) {
+            throw new IllegalArgumentException("Неверный текущий пароль!");
+        }
+
+        // Устанавливаем новый зашифрованный пароль
+        user.setPassword(passwordEncoder.encode(newPassword));
+        entityManager.merge(user); // Обновляем запись в базе
+
+        log.info("Пароль успешно изменен для пользователя с ID: {}", userId);
+    }
+
+
+    @Override
+    @Transactional
+    public void activateUser(Long userId) {
+        User user = entityManager.find(User.class, userId);
+        if (user == null) {
+            throw new UsernameNotFoundException("Пользователь с id: " + userId + " не найден!");
+        }
+        user.setActive(true);
+        entityManager.merge(user);
+    }
+
+
+    @Override
+    @Transactional
+    public void deactivateUser(Long userId) {
+        User user = entityManager.find(User.class, userId);
+        if (user == null) {
+            throw new UsernameNotFoundException("Пользователь с id: " + userId + " не найден!");
+        }
+        user.setActive(false);
+        entityManager.merge(user);
+    }
+
+
+    @Override
+    public List<UserDTO> searchUsers(String email, String username, String phoneNumber, Boolean active, LocalDateTime dateOfCreated, String roleName) {
+        StringBuilder queryBuilder = new StringBuilder("SELECT DISTINCT u FROM User u LEFT JOIN u.roles r WHERE 1=1");
+
+        // Добавляем условия только для ненулевых параметров
+        if (email != null && !email.isEmpty()) {
+            queryBuilder.append(" AND LOWER(u.email) LIKE :email");
+        }
+        if (username != null && !username.isEmpty()) {
+            queryBuilder.append(" AND LOWER(u.username) LIKE :username");
+        }
+        if (phoneNumber != null && !phoneNumber.isEmpty()) {
+            queryBuilder.append(" AND u.phoneNumber LIKE :phoneNumber");
+        }
+        if (active != null) {
+            queryBuilder.append(" AND u.active = :active");
+        }
+        if (dateOfCreated != null) {
+            queryBuilder.append(" AND u.dateOfCreated >= :dateOfCreated");
+        }
+        if (roleName != null && !roleName.isEmpty()) {
+            queryBuilder.append(" AND r.name = :roleName");
+        }
+
+        TypedQuery<User> query = entityManager.createQuery(queryBuilder.toString(), User.class);
+
+        // Устанавливаем параметры только для ненулевых значений
+        if (email != null && !email.isEmpty()) {
+            query.setParameter("email", "%" + email.toLowerCase() + "%");
+        }
+        if (username != null && !username.isEmpty()) {
+            query.setParameter("username", "%" + username.toLowerCase() + "%");
+        }
+        if (phoneNumber != null && !phoneNumber.isEmpty()) {
+            query.setParameter("phoneNumber", "%" + phoneNumber + "%");
+        }
+        if (active != null) {
+            query.setParameter("active", active);
+        }
+        if (dateOfCreated != null) {
+            query.setParameter("dateOfCreated", dateOfCreated);
+        }
+        if (roleName != null && !roleName.isEmpty()) {
+            query.setParameter("roleName", roleName);
+        }
+
+        return query.getResultList().stream().map(User::toUserDTO).toList();
+    }
+
+
+    @Override
+    public List<UserDTO> getUsersByRole(String roleName) {
+        TypedQuery<User> query = entityManager.createQuery(
+                "SELECT u FROM User u JOIN u.roles r WHERE r.name = :roleName", User.class
+        );
+        query.setParameter("roleName", roleName);
+        return query.getResultList().stream().map(User::toUserDTO).toList();
+    }
+
+
 
 //    @Override
 //    public void userBan(Long id) {
@@ -164,29 +274,37 @@ public class UserServiceImp implements UserService {
 //    }
 
     @Override
-    public Optional<User> findByEmail(String email) {
-        // Если пусто, то надо возвращать либо пустое либо 403 ошибку, если доступа нет
-        return entityManager.createQuery("select u from User u left join fetch u.roles where u.email=:email", User.class)
+    public Optional<UserDTO> findByEmail(String email) {
+        // Выполняем запрос и получаем User
+        Optional<User> userOptional = entityManager.createQuery("select u from User u left join fetch u.roles where u.email=:email", User.class)
                 .setParameter("email", email)
                 .getResultStream()
                 .findFirst();
+
+        // Если пользователь найден, преобразуем в UserDTO и возвращаем
+        return userOptional.map(User::toUserDTO);  // Предполагается, что у User есть метод toUserDTO
     }
 
-    public UserDTO getUserDTOByEmail(String email) {
-        User user = this.findByEmail(email) // Предположим, этот метод возвращает Optional<User>
-                .orElseThrow(() -> new UsernameNotFoundException("Пользователь с email: " + email + " не найден!"));
-        return user.toUserDTO();  // Преобразуем сущность в DTO
+    public boolean userExists(Long userId) {
+        return userRepository.existsById(userId);
     }
+
+
+//    public UserDTO getUserDTOByEmail(String email) {
+//        User user = this.findByEmail(email) // Предположим, этот метод возвращает Optional<User>
+//                .orElseThrow(() -> new UsernameNotFoundException("Пользователь с email: " + email + " не найден!"));
+//        return user.toUserDTO();  // Преобразуем сущность в DTO
+//    }
 
     // Пример метода для преобразования DTO в сущность
-    public User convertToEntity(UserDTO userDTO) {
-        User user = new User();
-        user.setId(userDTO.getId());
-        user.setEmail(userDTO.getEmail());
-        user.setUsername(userDTO.getUsername());
-        user.setRoles(userDTO.getRoles().stream()
-                .map(roleDTO -> new Role(roleDTO.getId(), roleDTO.getName())) // Преобразуем RoleDTO в Role
-                .collect(Collectors.toSet()));
-        return user;
-    }
+//    public User convertToEntity(UserDTO userDTO) {
+//        User user = new User();
+//        user.setId(userDTO.getId());
+//        user.setEmail(userDTO.getEmail());
+//        user.setUsername(userDTO.getUsername());
+//        user.setRoles(userDTO.getRoles().stream()
+//                .map(roleDTO -> new Role(roleDTO.getId(), roleDTO.getName())) // Преобразуем RoleDTO в Role
+//                .collect(Collectors.toSet()));
+//        return user;
+//    }
 }
